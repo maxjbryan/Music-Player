@@ -1,14 +1,11 @@
-// Controls playing/pausing songs.
-
 import javax.sound.sampled.*;
 import java.io.File;
 
 public class AudioController {
-    // Keep reference to the clip so it doesn't get garbage collected
-    private Clip currentClip;
+    private volatile Clip currentClip;
     public boolean clipPaused = false;
+    private float savedVolume = 0.1f;
 
-    // Optional callback fired on the audio thread when a song finishes naturally
     private Runnable onSongEnd = null;
 
     public void setOnSongEnd(Runnable callback) {
@@ -19,114 +16,167 @@ public class AudioController {
         return currentClip;
     }
 
-    public void playSound(String filePath) {
+    /**
+     * Closes the current clip safely, fully releasing the OS audio line.
+     * This must be called whenever playback ends (naturally or manually) so
+     * other apps (browsers, etc.) can acquire the audio device.
+     */
+    private void closeCurrentClip() {
+        Clip clip = currentClip;
+        if (clip == null) return;
         try {
-            if (filePath.endsWith(".wav")) {
-                // Save current volume before closing the old clip so it persists to the new one
-                float savedVolume = 0.1f;
-                if (currentClip != null && currentClip.isOpen()) {
-                    savedVolume = getVolume();
-                    currentClip.close();
+            if (clip.isRunning()) clip.stop();
+            clip.flush();
+            clip.close();
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Stops playback and immediately releases the audio line so other
+     * applications (e.g. browsers playing YouTube/Instagram) can use it.
+     */
+    public void stop() {
+        clipPaused = false;
+        closeCurrentClip();
+        currentClip = null;
+        System.out.println("Audio stopped and line released");
+    }
+
+    public void playSound(String filePath) {
+        Thread audioThread = new Thread(() -> {
+            try {
+                if (!filePath.endsWith(".wav")) {
+                    System.out.println("Unsupported audio format. Please use .wav files.");
+                    return;
                 }
 
+                float currentVolume = savedVolume;
+                if (currentClip != null && currentClip.isOpen()) {
+                    currentVolume = getVolume();
+                    savedVolume = currentVolume;
+                }
+                closeCurrentClip();
+                currentClip = null;
+
                 AudioInputStream audioInputStream = AudioSystem.getAudioInputStream(new File(filePath));
-                currentClip = AudioSystem.getClip();
+                AudioFormat format = audioInputStream.getFormat();
+
+                // Convert non-PCM formats (e.g. ulaw/alaw) so Java can play them
+                if (!format.getEncoding().equals(AudioFormat.Encoding.PCM_SIGNED)) {
+                    AudioFormat pcm = new AudioFormat(
+                            AudioFormat.Encoding.PCM_SIGNED,
+                            format.getSampleRate(),
+                            16,
+                            format.getChannels(),
+                            format.getChannels() * 2,
+                            format.getSampleRate(),
+                            false);
+                    audioInputStream = AudioSystem.getAudioInputStream(pcm, audioInputStream);
+                    format = pcm;
+                }
+
+                DataLine.Info info = new DataLine.Info(Clip.class, format);
+                if (!AudioSystem.isLineSupported(info)) {
+                    System.out.println("Audio line not supported for this format.");
+                    return;
+                }
+
+                Clip clip;
+                try {
+                    clip = (Clip) AudioSystem.getLine(info);
+                } catch (LineUnavailableException ex) {
+                    // Another app is holding the audio device — wait and retry once
+                    System.out.println("Audio line busy, retrying in 500ms…");
+                    Thread.sleep(500);
+                    clip = (Clip) AudioSystem.getLine(info);
+                }
+
+                currentClip = clip;
                 currentClip.open(audioInputStream);
 
-                // Reapply the saved volume to the new clip
-                setVolume(savedVolume);
+                setVolume(currentVolume);
 
-                // Fire onSongEnd callback when the clip stops naturally (not from pause/seek)
                 currentClip.addLineListener(event -> {
                     if (event.getType() == LineEvent.Type.STOP) {
                         Clip c = (Clip) event.getLine();
-                        // Only treat it as a natural end if we're at (or past) the end of the clip
                         if (!clipPaused && c.getMicrosecondPosition() >= c.getMicrosecondLength() - 10_000) {
                             System.out.println("Audio finished playing naturally");
+                            // ── FIX: close the clip so the OS audio line is released
+                            // immediately after the song ends. Without this, the audio
+                            // device stays locked and other apps (browsers, etc.) cannot
+                            // play any sound until this player is closed.
+                            closeCurrentClip();
+                            currentClip = null;
                             if (onSongEnd != null) onSongEnd.run();
                         }
                     }
                 });
 
                 currentClip.start();
-                System.out.println("Audio started playing");
                 clipPaused = false;
+                System.out.println("Audio started playing");
 
-                // NOTE: Thread.sleep removed — Clip plays on its own audio thread
-                // and blocking here prevented the progress timer from ever starting.
-
-            } else {
-                System.out.println("Unsupported audio format. Please use .wav files.");
+            } catch (LineUnavailableException ex) {
+                System.out.println("Audio line unavailable after retry: " + ex.getMessage());
+            } catch (Exception ex) {
+                System.out.println("Error playing sound: " + ex.getMessage());
+                ex.printStackTrace();
             }
-        } catch (Exception ex) {
-            System.out.println("Error playing sound: " + ex.getMessage());
-            ex.printStackTrace();
-        }
+        }, "audio-player-thread");
+
+        audioThread.setDaemon(true);
+        audioThread.start();
     }
 
     public void pause() {
-        if (currentClip != null) {
+        if (currentClip != null && currentClip.isRunning()) {
             currentClip.stop();
-
-            if (!clipPaused) {
-                clipPaused = true;
-            }
+            clipPaused = true;
         }
     }
 
     public void resume() {
         if (currentClip != null) {
             currentClip.start();
-            if (clipPaused) {
-                clipPaused = false;
-            }
+            clipPaused = false;
         }
     }
 
-    /**
-     * Sets the playback position in microseconds.
-     * Mutes audio during the seek to prevent the loud click/pop,
-     * then restores volume immediately after repositioning.
-     */
     public void setPosition(long microseconds) {
         if (currentClip != null && currentClip.isOpen()) {
             long maxPosition = currentClip.getMicrosecondLength();
-
             if (microseconds < 0) microseconds = 0;
             else if (microseconds > maxPosition) microseconds = maxPosition;
 
-            // Save volume, mute, seek, restore — avoids the loud scrub pop
             float savedVolume = getVolume();
-            setVolume(0.0001f); // effectively silent but avoids log10(0) = -Inf
+            setVolume(0.0001f);
             currentClip.setMicrosecondPosition(microseconds);
             setVolume(savedVolume);
 
-            // Ensure playback continues if it was running
             if (!clipPaused && !currentClip.isRunning()) {
                 currentClip.start();
             }
         }
     }
 
-    // https://stackoverflow.com/questions/40514910/set-volume-of-java-clip
-    // Converts the logarithmic dB scale to a linear value for simplicity.
-    // Usable range: 0.0 (silent) to 0.3 (loud enough for normal listening).
-    // The old range of 2.0 made anything above ~10% painfully loud.
-
     public float getVolume() {
         if (currentClip != null && currentClip.isOpen()) {
-            FloatControl gainControl = (FloatControl) currentClip.getControl(FloatControl.Type.MASTER_GAIN);
-            return (float) Math.pow(10f, gainControl.getValue() / 20f);
+            try {
+                FloatControl gainControl = (FloatControl) currentClip.getControl(FloatControl.Type.MASTER_GAIN);
+                return (float) Math.pow(10f, gainControl.getValue() / 20f);
+            } catch (IllegalArgumentException ignored) {}
         }
-        return 0.1f; // sensible default matching the new slider midpoint
+        return 0.1f;
     }
 
     public void setVolume(float volume) {
+        volume = Math.max(0.0001f, Math.min(volume, 0.3f));
+        savedVolume = volume;
         if (currentClip != null && currentClip.isOpen()) {
-            // Clamp to valid range — max 0.3 to keep volume sane across the full slider
-            volume = Math.max(0.0001f, Math.min(volume, 0.3f));
-            FloatControl gainControl = (FloatControl) currentClip.getControl(FloatControl.Type.MASTER_GAIN);
-            gainControl.setValue(20f * (float) Math.log10(volume));
+            try {
+                FloatControl gainControl = (FloatControl) currentClip.getControl(FloatControl.Type.MASTER_GAIN);
+                gainControl.setValue(20f * (float) Math.log10(volume));
+            } catch (IllegalArgumentException ignored) {}
         }
     }
 }

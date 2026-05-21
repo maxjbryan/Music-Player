@@ -18,7 +18,7 @@ import java.util.ArrayList;
  */
 public class PlaylistEditorFrame extends JInternalFrame {
 
-    // ── palette ───────────────────────────────────────────────────────────────
+    // palette
     private static final Color TRANS_CONTROL = new Color(10, 10, 12, 160);
     private static final Color TRANS_MID     = new Color(20, 20, 23, 140);
     private static final Color ACCENT_BLUE   = new Color(70, 130, 180);
@@ -29,26 +29,27 @@ public class PlaylistEditorFrame extends JInternalFrame {
     private final PlayerUI      ui;
     private final SongManagement sm;
 
-    // ── album browser ─────────────────────────────────────────────────────────
+    // album browser
     private final DefaultListModel<String> albumListModel  = new DefaultListModel<>();
     private final JList<String>            albumList        = new JList<>(albumListModel);
     private final DefaultListModel<String> albumSongModel  = new DefaultListModel<>();
     private final JList<String>            albumSongList   = new JList<>(albumSongModel);
 
-    // ── playlist editor ───────────────────────────────────────────────────────
+    // playlist editor
     private final JComboBox<String>        playlistPicker  = new JComboBox<>();
     private final JTextField               newNameField    = new JTextField("New Playlist");
     private final DefaultListModel<String> plSongModel     = new DefaultListModel<>();
     private final JList<String>            plSongList      = new JList<>(plSongModel);
 
-    private final JButton btnNew    = new JButton("New");
-    private final JButton btnAdd    = new JButton("Add →");
-    private final JButton btnRemove = new JButton("Remove");
-    private final JButton btnDelete = new JButton("Delete Playlist");
+    private final JButton btnNew      = new JButton("New");
+    private final JButton btnAdd      = new JButton("Add →");
+    private final JButton btnRemove   = new JButton("Remove");
+    private final JButton btnDelete   = new JButton("Delete Playlist");
+    private final JButton btnMoveUp   = new JButton("▲");
+    private final JButton btnMoveDown = new JButton("▼");
 
     private final JLabel statusLabel = new JLabel(" ");
 
-    // ─────────────────────────────────────────────────────────────────────────
     public PlaylistEditorFrame(PlayerUI ui) {
         super("Playlist Editor", true, true, true, true);
         this.ui = ui;
@@ -63,10 +64,7 @@ public class PlaylistEditorFrame extends JInternalFrame {
         setVisible(false);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  UI construction
-    // ─────────────────────────────────────────────────────────────────────────
-
+    // ui
     private void buildUi() {
         JPanel root = paintedPanel(TRANS_CONTROL, new BorderLayout(8, 4));
         root.setBorder(new EmptyBorder(10, 10, 10, 10));
@@ -79,7 +77,7 @@ public class PlaylistEditorFrame extends JInternalFrame {
         setContentPane(root);
     }
 
-    // ── Left: album browser ──
+    // album viewer
 
     private JPanel buildAlbumPanel() {
         JPanel p = paintedPanel(TRANS_MID, new BorderLayout(0, 4));
@@ -124,29 +122,39 @@ public class PlaylistEditorFrame extends JInternalFrame {
         return p;
     }
 
-    // ── Centre: add/remove buttons ──
+    // add/remove buttons in the middle
 
     private JPanel buildMidButtons() {
         styleButton(btnAdd);
         styleButton(btnRemove);
+        styleButton(btnMoveUp);
+        styleButton(btnMoveDown);
         btnAdd.setToolTipText("Add selected song(s) to the active playlist");
         btnRemove.setToolTipText("Remove selected song from the playlist");
+        btnMoveUp.setToolTipText("Move selected song up");
+        btnMoveDown.setToolTipText("Move selected song down");
 
         btnAdd.addActionListener(e -> addSelectedSongs());
         btnRemove.addActionListener(e -> removeSelectedSong());
+        btnMoveUp.addActionListener(e -> moveSelectedSong(-1));
+        btnMoveDown.addActionListener(e -> moveSelectedSong(1));
 
         JPanel p = paintedPanel(TRANS_CONTROL, new GridBagLayout());
         p.setPreferredSize(new Dimension(90, 0));
         GridBagConstraints g = new GridBagConstraints();
         g.gridx = 0; g.gridy = 0; g.insets = new Insets(6, 0, 6, 0);
         g.fill  = GridBagConstraints.HORIZONTAL;
-        p.add(btnAdd,    g);
+        p.add(btnAdd,      g);
         g.gridy = 1;
-        p.add(btnRemove, g);
+        p.add(btnRemove,   g);
+        g.gridy = 2; g.insets = new Insets(14, 0, 2, 0);
+        p.add(btnMoveUp,   g);
+        g.gridy = 3; g.insets = new Insets(2, 0, 6, 0);
+        p.add(btnMoveDown, g);
         return p;
     }
 
-    // ── Right: playlist editor ──
+    // playlist editor
 
     private JPanel buildPlaylistPanel() {
         JPanel p = paintedPanel(TRANS_MID, new BorderLayout(0, 4));
@@ -178,6 +186,39 @@ public class PlaylistEditorFrame extends JInternalFrame {
         // ── song list ──
         styleList(plSongList);
         plSongList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        plSongList.setDragEnabled(true);
+        plSongList.setDropMode(DropMode.INSERT);
+        plSongList.setTransferHandler(new javax.swing.TransferHandler() {
+            private int dragFromIndex = -1;
+
+            @Override public int getSourceActions(JComponent c) { return MOVE; }
+
+            @Override protected java.awt.datatransfer.Transferable createTransferable(JComponent c) {
+                dragFromIndex = plSongList.getSelectedIndex();
+                return new java.awt.datatransfer.StringSelection(
+                        dragFromIndex >= 0 ? plSongModel.getElementAt(dragFromIndex) : "");
+            }
+
+            @Override public boolean canImport(javax.swing.TransferHandler.TransferSupport ts) {
+                return ts.isDrop() && ts.isDataFlavorSupported(
+                        java.awt.datatransfer.DataFlavor.stringFlavor);
+            }
+
+            @Override public boolean importData(javax.swing.TransferHandler.TransferSupport ts) {
+                if (!canImport(ts) || dragFromIndex < 0) return false;
+                JList.DropLocation dl = (JList.DropLocation) ts.getDropLocation();
+                int to = dl.getIndex();
+                if (to > dragFromIndex) to--;   // account for removal shifting indices
+                String pl = (String) playlistPicker.getSelectedItem();
+                if (pl == null) return false;
+                sm.moveSong(pl, dragFromIndex, to);
+                onPlaylistPicked();
+                plSongList.setSelectedIndex(to);
+                ui.refreshPlaylistMenu();
+                status("✔ Reordered songs in \"" + pl + "\".");
+                return true;
+            }
+        });
 
         JPanel bottomControls = paintedPanel(TRANS_MID, new BorderLayout(4, 0));
         btnDelete.setFont(new Font("Default", Font.PLAIN, 11));
@@ -292,6 +333,25 @@ public class PlaylistEditorFrame extends JInternalFrame {
         onPlaylistPicked();
         ui.refreshPlaylistMenu();
         status("✔ Removed \"" + songName + "\" from \"" + pl + "\".");
+    }
+
+    private void moveSelectedSong(int delta) {
+        String pl = (String) playlistPicker.getSelectedItem();
+        if (pl == null) return;
+
+        int idx = plSongList.getSelectedIndex();
+        if (idx < 0) {
+            status("✖ Select a song to move.");
+            return;
+        }
+        int target = idx + delta;
+        if (target < 0 || target >= plSongModel.getSize()) return;
+
+        sm.moveSong(pl, idx, target);
+        onPlaylistPicked();
+        plSongList.setSelectedIndex(target);
+        ui.refreshPlaylistMenu();
+        status("✔ Moved song " + (delta < 0 ? "up" : "down") + " in \"" + pl + "\".");
     }
 
     private void createNewPlaylist() {
