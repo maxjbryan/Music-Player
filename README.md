@@ -6,7 +6,7 @@ ability to use songs downloaded into playlists to create user made playlists.
 works in wav files.
 
 ## New Changes:
-Added pop out menu, useful for fvwm stick window option.
-Added color themes.
-Added Shuffle and loop buttons.
+ ### - Added pop out menu, useful for fvwm stick window option.
+ ### - Added color themes.
+ ### - Added Shuffle and loop buttons.
 
